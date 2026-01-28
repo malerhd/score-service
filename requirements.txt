@@ -4,3 +4,4 @@ pandas
 numpy
 google-cloud-bigquery
 pyarrow
+db-dtypes
