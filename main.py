@@ -1,9 +1,12 @@
+# main.py
+import traceback
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from scoring import score_monthly_simple
 
-app = FastAPI()
+app = FastAPI(debug=True) 
 
 
 class ScoreRequest(BaseModel):
@@ -32,4 +35,5 @@ def score(req: ScoreRequest):
         )
         return {"status": "ok", "score": value, "client_key": req.client_key}
     except Exception as e:
+        traceback.print_exc()  
         raise HTTPException(status_code=500, detail=str(e))
