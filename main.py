@@ -1,23 +1,33 @@
 # main.py
 import traceback
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from scoring import score_monthly_simple
 
-app = FastAPI(debug=True) 
+app = FastAPI(debug=True)
 
 
 class ScoreRequest(BaseModel):
     project_id: str
     client_key: str
     target_table: str
+
     months_back: int = 24
     aggregate_last_n: int = 12
+
     rrss_policy: str = "renormalize"
     ga_fallback_aov: float = 0.0
     rrss_blend_policy: str = "split"
+
+    # ✅ NUEVO: fuentes activas (viene del webhook / backend)
+    # Acepta camelCase (syncedSources) y también podés mandar synced_sources
+    synced_sources: Optional[List[str]] = Field(default=None, alias="syncedSources")
+
+    class Config:
+        populate_by_name = True  # permite enviar synced_sources o syncedSources
 
 
 @app.post("/score")
@@ -32,8 +42,15 @@ def score(req: ScoreRequest):
             rrss_policy=req.rrss_policy,
             ga_fallback_aov=req.ga_fallback_aov,
             rrss_blend_policy=req.rrss_blend_policy,
+            # ✅ PASAMOS LA LISTA A scoring.py (tu cambio mínimo)
+            synced_sources=req.synced_sources,
         )
-        return {"status": "ok", "score": value, "client_key": req.client_key}
+        return {
+            "status": "ok",
+            "score": value,
+            "client_key": req.client_key,
+            "synced_sources": req.synced_sources,
+        }
     except Exception as e:
-        traceback.print_exc()  
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
