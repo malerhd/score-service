@@ -102,10 +102,11 @@ def read_monthly_panel(
       - use_ga: usa ga_daily (si existe) sino ga_monthly
       - use_meta: usa ads_monthly(meta-ads) para costs
     """
-
     bq = _bq_client(project_id)
 
-    # Bloques SQL “vacíos” si una fuente no está activa (para que el SQL compile igual)
+    # ✅ FIX: BigQuery no permite WHERE sin FROM.
+    # Para CTE "vacío" usamos: FROM (SELECT 1) WHERE 1=0
+
     tn_cte = f"""
     tn AS (
       SELECT client_key, month,
@@ -119,11 +120,12 @@ def read_monthly_panel(
     """ if use_tn else """
     tn AS (
       SELECT
-        CAST(NULL AS STRING) AS client_key,
-        CAST(NULL AS DATE)   AS month,
+        CAST(NULL AS STRING)  AS client_key,
+        CAST(NULL AS DATE)    AS month,
         CAST(0.0  AS FLOAT64) AS purchase_revenue,
         CAST(0    AS INT64)   AS purchases
-      WHERE FALSE
+      FROM (SELECT 1)
+      WHERE 1=0
     ),
     """
 
@@ -137,14 +139,14 @@ def read_monthly_panel(
     """ if use_meta else """
     meta AS (
       SELECT
-        CAST(NULL AS STRING) AS client_key,
-        CAST(NULL AS DATE)   AS month,
+        CAST(NULL AS STRING)  AS client_key,
+        CAST(NULL AS DATE)    AS month,
         CAST(0.0  AS FLOAT64) AS cost_meta
-      WHERE FALSE
+      FROM (SELECT 1)
+      WHERE 1=0
     ),
     """
 
-    # Versión GA daily (si existe). Si use_ga=False, ga_daily/ga quedan vacíos.
     ga_daily_cte = f"""
     ga_daily AS (
       SELECT
@@ -170,26 +172,27 @@ def read_monthly_panel(
     """ if use_ga else """
     ga_daily AS (
       SELECT
-        CAST(NULL AS STRING) AS client_key,
-        CAST(NULL AS DATE)   AS month,
-        CAST(0    AS INT64)  AS sessions,
-        CAST(0    AS INT64)  AS transactions,
+        CAST(NULL AS STRING)  AS client_key,
+        CAST(NULL AS DATE)    AS month,
+        CAST(0    AS INT64)   AS sessions,
+        CAST(0    AS INT64)   AS transactions,
         CAST(0.0  AS FLOAT64) AS ga_revenue
-      WHERE FALSE
+      FROM (SELECT 1)
+      WHERE 1=0
     ),
     ga AS (
       SELECT
-        CAST(NULL AS STRING) AS client_key,
-        CAST(NULL AS DATE)   AS month,
+        CAST(NULL AS STRING)  AS client_key,
+        CAST(NULL AS DATE)    AS month,
         CAST(0.0  AS FLOAT64) AS ucr,
         CAST(0    AS INT64)   AS ga_purchases,
         CAST(0.0  AS FLOAT64) AS ga_revenue,
         CAST(0.0  AS FLOAT64) AS ga_aov
-      WHERE FALSE
+      FROM (SELECT 1)
+      WHERE 1=0
     ),
     """
 
-    # Versión GA monthly (fallback si falla ga_daily).
     ga_monthly_cte = f"""
     ga AS (
       SELECT client_key, month,
@@ -203,12 +206,13 @@ def read_monthly_panel(
     """ if use_ga else """
     ga AS (
       SELECT
-        CAST(NULL AS STRING) AS client_key,
-        CAST(NULL AS DATE)   AS month,
+        CAST(NULL AS STRING)  AS client_key,
+        CAST(NULL AS DATE)    AS month,
         CAST(0.0  AS FLOAT64) AS ucr,
         CAST(0    AS INT64)   AS ga_purchases,
         CAST(0.0  AS FLOAT64) AS ga_revenue
-      WHERE FALSE
+      FROM (SELECT 1)
+      WHERE 1=0
     ),
     """
 
@@ -221,22 +225,17 @@ def read_monthly_panel(
     if use_meta:
         months_union_parts.append("SELECT client_key, month FROM meta")
 
-    # Si todo está apagado, devolvemos panel vacío desde SQL (igual después lo manejamos arriba)
     if not months_union_parts:
         return pd.DataFrame()
 
     union_sql = "\n      UNION DISTINCT ".join(months_union_parts)
 
     months_cte = f"""
-        months AS (
-          {union_sql}
-        )
-        """
+    months AS (
+      {union_sql}
+    )
+    """
 
-
-
-    # Selección final: preferencia TN si está activa; si TN no activa, usa GA.
-    # Si TN activa pero no hay tn.purchase_revenue (NULL/0), cae a GA si GA activa.
     revenue_expr = """
     COALESCE(
       tn.purchase_revenue,
@@ -570,13 +569,11 @@ def score_monthly_simple(
         )
 
     if panel.empty:
-        # Llegamos acá si ga_active=False (pero tn_active=True) y TN no tuvo nada
-        # o si GA no tiene data tampoco.
         logger.warning("[SCORE] Panel mensual vacío incluso después de fallback → score=1.")
         write_minimal_score(project_id, target_table, client_key, 1)
         return 1
 
-    # 2) IG / TikTok (lo dejás como está; si no hay métricas, se renormaliza según rrss_policy)
+    # 2) IG / TikTok (igual que antes)
     ig_seguidores: Optional[int] = seguidores
     ig_engagement: Optional[float] = engagement_rate_redes
     if ig_seguidores is None or ig_engagement is None:
@@ -626,18 +623,8 @@ def score_monthly_simple(
     base_score_value = float(scored["score_benchmark_rrss_override"].tail(aggregate_last_n).mean() * 100.0)
     base01 = max(0.0, min(1.0, base_score_value / 100.0))
 
-    # Overlays (los dejás tal cual: si no pasan json, no afecta)
-    # Nota: si más adelante querés gatearlos por synced_sources, se hace igual que TN/GA.
-    m_score01 = None
-    b_score01 = None
-    if merchant_json is not None:
-        # No lo tocamos (tu versión actual lo calcula desde JSON externo)
-        pass
-    if bcra_json is not None:
-        # No lo tocamos (tu versión actual lo calcula desde JSON externo)
-        pass
-
-    blended01 = base01  # overlays opcionales apagados en esta versión mínima
+    # Overlays opcionales: no tocamos (en esta versión mínima quedan apagados si no pasan JSON)
+    blended01 = base01
     score_value = int(round(blended01 * 1000.0))
     score_value = max(1, min(1000, score_value))
 
@@ -645,4 +632,3 @@ def score_monthly_simple(
 
     logger.info(f"[SCORE] client={client_key} base100={base_score_value:.2f} final={score_value}")
     return score_value
-
